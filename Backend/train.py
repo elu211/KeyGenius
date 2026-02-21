@@ -37,13 +37,12 @@ print(f"Training: {HAND_NAME} hand transformer")
 train_dataset = FingeringDataset(DATA_DIR, hand=HAND, max_seq_len=MAX_SEQ_LEN, split='train')
 val_dataset = FingeringDataset(DATA_DIR, hand=HAND, max_seq_len=MAX_SEQ_LEN, split='val')
 
-train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True)
-val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
+train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=True)
+val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True)
 
 # Calculate class weights for imbalance
 finger_counts = {i: 0 for i in range(1, 6)}
-for i in train_dataset.indices:
-    seq = train_dataset.sequences[i]
+for seq in train_dataset.sequences:
     for n in seq:
         if 1 <= n['finger'] <= 5:
             finger_counts[n['finger']] += 1

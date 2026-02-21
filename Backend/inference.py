@@ -37,7 +37,7 @@ def load_model(checkpoint_path, hand='right'):
 
 def notes_to_features(notes):
     """
-    Convert note names to 17-dim model features.
+    Convert note names to 18-dim model features.
     
     Features:
     0: midi_norm
@@ -47,14 +47,13 @@ def notes_to_features(notes):
     4: interval_next
     5: direction
     6: is_chord
-    7: chord_size_norm
-    8: chord_position
-    9: pattern_scale
-    10: pattern_arpeggio
-    11: pattern_repeat
+    7: black_key
+    8: chord_size_norm
+    9: chord_position
+    10: pattern_scale
+    11: pattern_arpeggio
     12: pattern_repeat
     13-17: prev_finger one-hot
-    18: black_key
     """
     features = []
     midis = [NOTE_TO_MIDI.get(n, 60) for n in notes]

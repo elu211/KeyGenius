@@ -73,7 +73,7 @@ def extract_sequences(notes, hand, max_seq_len=200):
 
 def encode_sequence(seq):
     """
-    17 features per note:
+    18 features per note:
     0: midi_norm
     1: duration
     2: delta_time
@@ -81,14 +81,13 @@ def encode_sequence(seq):
     4: interval_next (lookahead)
     5: direction
     6: is_chord
-    7: is_chord
-    8: black_key
-    9: chord_size_norm
-    10: chord_position
-    11: pattern_scale
-    12: pattern_arpeggio
-    13: pattern_repeat
-    14-18: prev_finger one-hot
+    7: black_key
+    8: chord_size_norm
+    9: chord_position
+    10: pattern_scale
+    11: pattern_arpeggio
+    12: pattern_repeat
+    13-17: prev_finger one-hot
     """
     features = []
     fingers = []
