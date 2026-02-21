@@ -151,7 +151,7 @@ def predict_batch(model, features, max_seq=200):
             
             all_fingers.extend(preds[0, :seq_len].cpu().numpy().tolist())
     
-    return all_fingers, [0.9] * len(all_fingers) # Mock confidences for now
+    return all_fingers, [0.9] * len(all_fingers)
 
 
 def infer(img_input, checkpoint_path):
@@ -171,42 +171,83 @@ def infer(img_input, checkpoint_path):
     # Extract notes
     print("Extracting notes from image...")
     
-    if isinstance(img_input, list):
-        notes, coords, bboxes = extract_from_pages(img_input)
-    elif Path(img_input).is_dir():
-        notes, coords, bboxes = extract_from_folder(img_input)
-    else:
-        notes, coords, bboxes = extract_from_image(img_input)
-        coords = [(x, y, 0) for x, y in coords]
+    notes, hands, coords, bboxes = extract_from_image(img_input)
+    coords = [(x, y, 0) for x, y in coords]
     
     if len(notes) == 0:
         print("No notes found!")
-        return [], [], []
+        return [], [], [], []
     
     print(f"Found {len(notes)} notes")
     
     # Load model
-    print("Loading model...")
+    print(f"Loading model: {checkpoint_path}")
     model = load_model(checkpoint_path)
     
     # Convert to features
     features = notes_to_features(notes)
     
     # Predict
-    print("Predicting fingerings with CRF...")
+    print("Predicting fingerings...")
     fingers, confidences = predict_batch(model, features)
     
     return notes, coords, fingers, confidences
 
-def adjust_fingering_coords(coords, notes, hand='right'):
+def infer_dual(img_path, rh_model_path, lh_model_path):
     """
-    Adjust note coordinates to move them to a good position for finger numbers.
-    RH: Usually above the note. LH: Usually below.
+    Inference using both RH and LH models.
+    """
+    from fast_oemer_extract import extract_from_image
+    
+    print(f"Processing image for dual inference: {img_path}")
+    notes, hands, raw_coords, bboxes = extract_from_image(img_path)
+    
+    if not notes:
+        return [], [], [], []
+
+    # Map hand codes
+    rh_indices = [i for i, h in enumerate(hands) if h == 0]
+    lh_indices = [i for i, h in enumerate(hands) if h == 1]
+    
+    final_fingers = [0] * len(notes)
+    final_confidences = [0.0] * len(notes)
+    
+    # Process Right Hand
+    if rh_indices and os.path.exists(rh_model_path):
+        print(f"Predicting RH ({len(rh_indices)} notes)...")
+        rh_model = load_model(rh_model_path)
+        rh_notes = [notes[i] for i in rh_indices]
+        rh_features = notes_to_features(rh_notes)
+        fingers, confs = predict_batch(rh_model, rh_features)
+        for i, idx in enumerate(rh_indices):
+            final_fingers[idx] = fingers[i]
+            final_confidences[idx] = confs[i]
+            
+    # Process Left Hand
+    if lh_indices and os.path.exists(lh_model_path):
+        print(f"Predicting LH ({len(lh_indices)} notes)...")
+        lh_model = load_model(lh_model_path)
+        lh_notes = [notes[i] for i in lh_indices]
+        lh_features = notes_to_features(lh_notes)
+        fingers, confs = predict_batch(lh_model, lh_features)
+        for i, idx in enumerate(lh_indices):
+            final_fingers[idx] = fingers[i]
+            final_confidences[idx] = confs[i]
+
+    # Convert coords to (x, y, page)
+    coords = [(x, y, 0) for x, y in raw_coords]
+    
+    return notes, hands, coords, final_fingers, final_confidences
+
+def adjust_fingering_coords(coords, hands):
+    """
+    Adjust note coordinates based on which hand (stave) they belong to.
+    RH (hand 0): Move UP (negative y offset)
+    LH (hand 1): Move DOWN (positive y offset)
     """
     adjusted = []
-    offset = -35 if hand == 'right' else 35
-    for (x, y, p) in coords:
-        # Move up/down depending on hand
+    for (x, y, p), hand in zip(coords, hands):
+        offset = -40 if hand == 0 else 40
         adjusted.append((x, y + offset, p))
     return adjusted
 

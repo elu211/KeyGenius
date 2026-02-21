@@ -50,17 +50,18 @@ def extract_from_image(img_path):
         y1, y2 = int(ys.min()), int(ys.max())
         cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
         
-        note_name = _y_to_note(cy, staves)
-        raw.append((cx, note_name, (cx, cy), [x1, y1, x2, y2]))
+        note_name, hand = _y_to_note(cy, staves)
+        raw.append((cx, note_name, hand, (cx, cy), [x1, y1, x2, y2]))
     
     # Sort left to right
     raw.sort(key=lambda x: x[0])
     
     notes = [r[1] for r in raw]
-    coords = [r[2] for r in raw]
-    bboxes = [r[3] for r in raw]
+    hands = [r[2] for r in raw]
+    coords = [r[3] for r in raw]
+    bboxes = [r[4] for r in raw]
     
-    return notes, coords, bboxes
+    return notes, hands, coords, bboxes
 
 
 def extract_from_pages(img_paths):
@@ -168,7 +169,7 @@ def _find_staves(staff_map):
 
 def _y_to_note(y, staves):
     if not staves:
-        return 'C4'
+        return 'C4', 0
     
     best = None
     idx = 0
@@ -191,8 +192,9 @@ def _y_to_note(y, staves):
     
     note_idx = (base_idx + pos) % 7
     octave = base_oct + (base_idx + pos) // 7
+    hand = idx % 2  # 0 for even (Treble), 1 for odd (Bass)
     
-    return f"{all_notes[note_idx]}{octave}"
+    return f"{all_notes[note_idx]}{octave}", hand
 
 
 if __name__ == "__main__":
