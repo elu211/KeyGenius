@@ -20,12 +20,12 @@ EPOCHS = 80
 PATIENCE = 15
 
 # Transformer Params
-INPUT_DIM = 13
+INPUT_DIM = 15
 D_MODEL = 256
 NHEAD = 8
 NUM_LAYERS = 4
 DIM_FF = 1024
-DROPOUT = 0.3
+DROPOUT = 0.4 # Higher dropout for small data
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Device: {device}")
@@ -70,8 +70,14 @@ model = FingeringTransformer(
 
 print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
-optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=0.1)
-scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2)
+optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=0.15)
+# Cosine Annealing with Warmup can be done via OneCycleLR
+scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    optimizer, max_lr=LR, 
+    steps_per_epoch=len(train_loader), 
+    epochs=EPOCHS,
+    pct_start=0.1
+)
 
 # ============================================================
 # TRAINING HOOKS
@@ -92,8 +98,9 @@ def train_epoch():
         emissions, loss = model(features, fingers=fingers, mask=mask, src_key_padding_mask=pad_mask)
         
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5) # Tighter clipping
         optimizer.step()
+        scheduler.step()
         
         # For accuracy, use generate (CRF decode)
         with torch.no_grad():
@@ -147,7 +154,7 @@ print("=" * 60 + "\n")
 for epoch in range(EPOCHS):
     train_loss, train_acc = train_epoch()
     val_loss, val_acc, per_finger = validate()
-    scheduler.step()
+    # scheduler.step() # Handled in batch loop
     
     pf = " ".join([f"{f}:{per_finger[f]*100:.0f}%" for f in range(1, 6)])
     print(f"Epoch {epoch+1:3d} | Loss: {train_loss:.3f} | Train Acc: {train_acc*100:.1f}% | Val Acc: {val_acc*100:.1f}% | {pf}")

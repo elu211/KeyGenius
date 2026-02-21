@@ -13,72 +13,14 @@ for octave in range(0, 9):
         if note in flat_map:
             NOTE_TO_MIDI[f"{flat_map[note]}{octave}"] = midi_num
 
-
-def parse_fingering_file(filepath):
-    lines = Path(filepath).read_text().strip().split("\n")
-    notes = []
-    for line in lines:
-        if not line.strip() or line.startswith("//"):
-            continue
-        parts = line.split()
-        if len(parts) < 8:
-            continue
-        try:
-            start_time = float(parts[1])
-            end_time = float(parts[2])
-            note_name = parts[3]
-            hand = int(parts[6])
-            finger_raw = parts[7]
-            if '_' in finger_raw:
-                finger = int(finger_raw.split('_')[0])
-            else:
-                finger = int(finger_raw)
-            finger = abs(finger)
-            if finger < 1 or finger > 5:
-                continue
-            if note_name not in NOTE_TO_MIDI:
-                continue
-            notes.append({
-                'start': start_time,
-                'end': end_time,
-                'note': note_name,
-                'midi': NOTE_TO_MIDI[note_name],
-                'hand': hand,
-                'finger': finger,
-                'duration': end_time - start_time
-            })
-        except (ValueError, IndexError):
-            continue
-    return notes
-
-
-def extract_sequences(notes, hand, max_seq_len=200):
-    hand_notes = sorted(
-        [n for n in notes if n['hand'] == hand],
-        key=lambda x: x['start']
-    )
-    if len(hand_notes) == 0:
-        return []
-    
-    sequences = []
-    stride = max(max_seq_len // 2, 1)
-    for i in range(0, len(hand_notes), stride):
-        seq = hand_notes[i:i + max_seq_len]
-        if len(seq) >= 10:
-            sequences.append(seq)
-        if i + max_seq_len >= len(hand_notes):
-            break
-    return sequences
-
-
 def encode_sequence(seq, is_training=False):
     """
-    13 features per note:
+    15 Technique-Aware features:
     0: midi_norm
     1: duration
-    2: delta_time
-    3: interval_prev
-    4: interval_next (lookahead)
+    2: delta_time (gap from prev note)
+    3: rel_interval (midi - prev_midi) - CRITICAL for reach
+    4: interval_next
     5: direction
     6: is_chord
     7: black_key
@@ -87,6 +29,8 @@ def encode_sequence(seq, is_training=False):
     10: pattern_scale
     11: pattern_arpeggio
     12: pattern_repeat
+    13: time_since_phrase_start
+    14: local_pitch_variance (detecting jumps)
     """
     features = []
     fingers = []
@@ -95,192 +39,143 @@ def encode_sequence(seq, is_training=False):
     starts = [n['start'] for n in seq]
     ends = [n['end'] for n in seq]
     
-    # Detect chords
-    chord_groups = []
-    current_chord = [0]
-    for i in range(1, len(seq)):
-        if starts[i] < ends[i-1] - 0.01:  # Overlapping = chord
-            current_chord.append(i)
-        else:
-            chord_groups.append(current_chord)
-            current_chord = [i]
-    chord_groups.append(current_chord)
-    
-    # Map note index to chord info
-    note_chord_info = {}
-    for chord in chord_groups:
-        chord_size = len(chord)
-        sorted_by_pitch = sorted(chord, key=lambda x: midis[x])
-        for pos, idx in enumerate(sorted_by_pitch):
-            note_chord_info[idx] = {
-                'is_chord': chord_size > 1,
-                'chord_size': chord_size,
-                'chord_position': pos / max(chord_size - 1, 1) if chord_size > 1 else 0.5
-            }
-    
-    # --- DATA AUGMENTATION (Training only) ---
+    # --- DATA AUGMENTATION ---
     if is_training:
-        # Random transposition (-3 to +3 semitones)
-        if np.random.random() > 0.5:
-            transpose = np.random.randint(-3, 4)
-            midis = [m + transpose for m in midis]
+        # Transposition range +/- 5 semitones
+        if np.random.random() > 0.4:
+            trans = np.random.randint(-5, 6)
+            midis = [m + trans for m in midis]
         
-        # Random time jitter
-        if np.random.random() > 0.5:
-            time_jitter = 1.0 + (np.random.random() - 0.5) * 0.1 
-            starts = [s * time_jitter for s in starts]
-            ends = [e * time_jitter for e in ends]
+        # Time jitter
+        if np.random.random() > 0.4:
+            jitter = 1.0 + (np.random.random() - 0.5) * 0.15
+            starts = [s * jitter for s in starts]
+            ends = [e * jitter for e in ends]
+
+    # Chord & Neighborhood Processing
+    note_info = []
+    for i in range(len(seq)):
+        # Reach/Interval
+        rel_interval = (midis[i] - midis[i-1]) / 12.0 if i > 0 else 0.0
+        
+        # Local variance
+        local_range = midis[max(0, i-2):min(len(midis), i+3)]
+        l_var = (max(local_range) - min(local_range)) / 24.0 if len(local_range) > 1 else 0.0
+        
+        # Basic movement
+        is_black = 1.0 if (midis[i] % 12) in [1, 3, 6, 8, 10] else 0.0
+        
+        # Chord logic
+        chord_peers = [j for j in range(len(seq)) if abs(starts[i] - starts[j]) < 0.02]
+        is_chord = 1.0 if len(chord_peers) > 1 else 0.0
+        chord_pos = 0.5
+        if len(chord_peers) > 1:
+            sorted_peers = sorted(chord_peers, key=lambda x: midis[x])
+            chord_pos = sorted_peers.index(i) / (len(chord_peers)-1)
+
+        note_info.append({
+            'rel_iv': np.clip(rel_interval, -1.5, 1.5),
+            'l_var': l_var,
+            'is_black': is_black,
+            'is_chord': is_chord,
+            'chord_pos': chord_pos,
+            'chord_size': min(len(chord_peers), 5) / 5.0
+        })
 
     for i, note in enumerate(seq):
         midi = midis[i]
         start = starts[i]
         dur = ends[i] - starts[i]
-        finger = note['finger']
         
-        # Basic features
-        midi_norm = (midi - 21) / 87.0
-        duration = min(dur, 2.0)
-        
-        # Delta time
-        delta = min(start - starts[i-1], 2.0) if i > 0 else 0.0
-        
-        # Intervals
-        interval_prev = (midi - midis[i-1]) / 24.0 if i > 0 else 0.0
-        interval_next = (midis[i+1] - midi) / 24.0 if i < len(seq) - 1 else 0.0
-        interval_prev = np.clip(interval_prev, -1, 1)
-        interval_next = np.clip(interval_next, -1, 1)
-        
-        # Direction
-        if i > 0:
-            direction = 1.0 if midi > midis[i-1] else (-1.0 if midi < midis[i-1] else 0.0)
-        else:
-            direction = 0.0
-        
-        # Chord info
-        chord_info = note_chord_info.get(i, {'is_chord': False, 'chord_size': 1, 'chord_position': 0.5})
-        is_chord = 1.0 if chord_info['is_chord'] else 0.0
-        chord_size_norm = min(chord_info['chord_size'], 5) / 5.0
-        chord_position = chord_info['chord_position']
-        
-        # Pattern detection
-        if i >= 2:
-            recent_intervals = [midis[j] - midis[j-1] for j in range(max(1, i-3), i+1)]
-            steps = sum(1 for iv in recent_intervals if abs(iv) in [1, 2])
-            arps = sum(1 for iv in recent_intervals if abs(iv) in [3, 4, 5])
-            repeats = sum(1 for iv in recent_intervals if iv == 0)
-            n = len(recent_intervals)
-            pattern_scale = steps / n if n > 0 else 0
-            pattern_arpeggio = arps / n if n > 0 else 0
-            pattern_repeat = repeats / n if n > 0 else 0
-        else:
-            pattern_scale = 0.0
-            pattern_arpeggio = 0.0
-            pattern_repeat = 0.0
-        
-        # Black key feature
-        def is_black(m):
-            return (m % 12) in [1, 3, 6, 8, 10]
-        black_key = 1.0 if is_black(midi) else 0.0
-
+        # Features
         feature_vec = [
-            midi_norm,
-            duration,
-            delta,
-            interval_prev,
-            interval_next,
-            direction,
-            is_chord,
-            black_key,
-            chord_size_norm,
-            chord_position,
-            pattern_scale,
-            pattern_arpeggio,
-            pattern_repeat
+            (midi - 21) / 87.0,
+            min(dur, 2.0),
+            min(start - starts[i-1], 2.0) if i > 0 else 0.0,
+            note_info[i]['rel_iv'],
+            (midis[i+1] - midi) / 12.0 if i < len(seq)-1 else 0.0,
+            1.0 if (i > 0 and midi > midis[i-1]) else (-1.0 if (i > 0 and midi < midis[i-1]) else 0.0),
+            note_info[i]['is_chord'],
+            note_info[i]['is_black'],
+            note_info[i]['chord_size'],
+            note_info[i]['chord_pos'],
+            0.0, 0.0, 0.0, # Pattern placeholders
+            min(start - starts[0], 10.0) / 10.0,
+            note_info[i]['l_var']
         ]
         
+        # Update pattern logic
+        if i >= 2:
+            ivs = [abs(midis[j] - midis[j-1]) for j in range(max(1, i-3), i+1)]
+            feature_vec[10] = sum(1 for v in ivs if 1 <= v <= 2) / len(ivs) # Scale
+            feature_vec[11] = sum(1 for v in ivs if 3 <= v <= 5) / len(ivs) # Arp
+            feature_vec[12] = sum(1 for v in ivs if v == 0) / len(ivs)     # Repeat
+
         features.append(feature_vec)
-        fingers.append(finger)
+        fingers.append(note['finger'])
     
     return np.array(features, dtype=np.float32), np.array(fingers, dtype=np.int64)
 
-
 class FingeringDataset(Dataset):
-    def __init__(self, data_dir, hand=0, max_seq_len=200, split='train', val_ratio=0.2):
+    def __init__(self, data_dir, hand=0, max_seq_len=200, split='train', val_ratio=0.15):
         self.max_seq_len = max_seq_len
         self.hand = hand
         self.split = split
         
-        finger_files = sorted(Path(data_dir).glob("*.txt"))
-        print(f"Found {len(finger_files)} fingering files")
+        # Keep piece-wise split for validation integrity
+        files = sorted(Path(data_dir).glob("*.txt"))
+        piece_map = {}
+        for f in files:
+            pid = f.stem.split('-')[0]
+            if pid not in piece_map: piece_map[pid] = []
+            piece_map[pid].append(f)
         
-        piece_to_files = {}
-        for f in finger_files:
-            piece_id = f.stem.split("-")[0]
-            if piece_id not in piece_to_files:
-                piece_to_files[piece_id] = []
-            piece_to_files[piece_id].append(f)
-        
-        piece_ids = sorted(piece_to_files.keys())
-        print(f"Found {len(piece_ids)} unique pieces")
-        
+        pids = sorted(piece_map.keys())
         np.random.seed(42)
-        piece_indices = np.random.permutation(len(piece_ids))
-        split_idx = int(len(piece_indices) * (1 - val_ratio))
+        idx = np.random.permutation(len(pids))
+        split_pt = int(len(pids) * (1 - val_ratio))
         
-        if split == 'train':
-            selected_pieces = [piece_ids[i] for i in piece_indices[:split_idx]]
-        else:
-            selected_pieces = [piece_ids[i] for i in piece_indices[split_idx:]]
+        sel_pids = [pids[i] for i in idx[:split_pt]] if split == 'train' else [pids[i] for i in idx[split_pt:]]
         
-        print(f"{split.capitalize()}: {len(selected_pieces)} pieces")
+        self.sequences = []
+        for pid in sel_pids:
+            for f in piece_map[pid]:
+                notes = sorted([n for n in parse_fingering_file(f) if n['hand'] == hand], key=lambda x: x['start'])
+                # Sliding window sequences
+                for i in range(0, len(notes), max_seq_len // 2):
+                    s = notes[i:i + max_seq_len]
+                    if len(s) >= 8: self.sequences.append(s)
         
-        selected_files = []
-        for piece_id in selected_pieces:
-            selected_files.extend(piece_to_files[piece_id])
-        
-        print(f"  {len(selected_files)} files")
-        
-        all_sequences = []
-        for f in selected_files:
-            notes = parse_fingering_file(f)
-            sequences = extract_sequences(notes, hand, max_seq_len)
-            all_sequences.extend(sequences)
-        
-        self.sequences = all_sequences
-        print(f"  {len(self.sequences)} sequences for {'right' if hand == 0 else 'left'} hand")
-        
-        all_fingers = []
-        for seq in self.sequences:
-            all_fingers.extend([n['finger'] for n in seq])
-        dist = Counter(all_fingers)
-        print(f"  Finger dist: {dict(sorted(dist.items()))}")
-    
-    def __len__(self):
-        return len(self.sequences)
+        print(f"{split.upper()} set: {len(self.sequences)} sequences ({hand})")
+
+    def __len__(self): return len(self.sequences)
     
     def __getitem__(self, idx):
-        seq = self.sequences[idx]
-        features, fingers = encode_sequence(seq, is_training=(self.split == 'train'))
-        
+        features, fingers = encode_sequence(self.sequences[idx], is_training=(self.split == 'train'))
         seq_len = len(features)
+        
+        # Padding
         if seq_len < self.max_seq_len:
-            pad_len = self.max_seq_len - seq_len
-            features = np.pad(features, ((0, pad_len), (0, 0)), mode='constant')
-            fingers = np.pad(fingers, (0, pad_len), mode='constant')
+            pad = self.max_seq_len - seq_len
+            features = np.pad(features, ((0, pad), (0, 0)))
+            fingers = np.pad(fingers, (0, pad))
         
         mask = np.zeros(self.max_seq_len, dtype=np.float32)
         mask[:seq_len] = 1.0
-        
-        return (
-            torch.from_numpy(features),
-            torch.from_numpy(fingers),
-            torch.from_numpy(mask),
-        )
+        return torch.from_numpy(features), torch.from_numpy(fingers), torch.from_numpy(mask)
 
-
-if __name__ == "__main__":
-    data_dir = "Music_Data/FingeringFiles"
-    ds = FingeringDataset(data_dir, hand=0, split='train')
-    f, fingers, mask = ds[0]
-    print(f"\nFeature shape: {f.shape}")
-    print(f"First 5 fingers: {fingers[:5].tolist()}")
+def parse_fingering_file(p):
+    notes = []
+    lines = p.read_text().split("\n")
+    for l in lines:
+        if "//" in l or not l.strip(): continue
+        pts = l.split()
+        if len(pts) < 8: continue
+        try:
+            f_raw = pts[7].split('_')[0]
+            notes.append({
+                'start': float(pts[1]), 'end': float(pts[2]), 'midi': NOTE_TO_MIDI.get(pts[3], 60),
+                'hand': int(pts[6]), 'finger': abs(int(f_raw))
+            })
+        except: continue
+    return notes

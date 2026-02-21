@@ -4,6 +4,7 @@ Handles multiple pages.
 """
 import torch
 import numpy as np
+import os
 from pathlib import Path
 from model import FingeringTransformer
 from fast_oemer_extract import extract_from_image, extract_from_pages, extract_from_folder, NOTE_TO_MIDI
@@ -15,7 +16,7 @@ def load_model(checkpoint_path, hand='right'):
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
     model = FingeringTransformer(
-        input_dim=13,
+        input_dim=15,
         d_model=256,
         nhead=8,
         num_layers=4,
@@ -25,7 +26,8 @@ def load_model(checkpoint_path, hand='right'):
         class_weights=None
     )
     
-    model.load_state_dict(checkpoint['model_state_dict'])
+    # Use strict=False because class_weights is a buffer that might exist in checkpoint but not needed for inference
+    model.load_state_dict(checkpoint['model_state_dict'], strict=False)
     model.to(device)
     model.eval()
     
@@ -62,62 +64,30 @@ def notes_to_features(notes):
     for i, note_name in enumerate(notes):
         midi = midis[i]
         
-        # Basic features
-        midi_norm = (midi - 21) / 87.0
-        duration = 0.5  # Placeholder
-        delta_time = 0.2  # Placeholder
-        
-        # Intervals
-        interval_prev = (midi - midis[i-1]) / 24.0 if i > 0 else 0.0
-        interval_next = (midis[i+1] - midi) / 24.0 if i < n - 1 else 0.0
-        interval_prev = np.clip(interval_prev, -1, 1)
-        interval_next = np.clip(interval_next, -1, 1)
-        
-        # Direction
-        if i > 0:
-            direction = 1.0 if midi > midis[i-1] else (-1.0 if midi < midis[i-1] else 0.0)
-        else:
-            direction = 0.0
-        
-        # Chord detection (simple: same x position = chord)
-        # At inference we don't have timing, so set to 0
-        is_chord = 0.0
-        chord_size_norm = 0.2
-        chord_position = 0.5
-        
-        # Pattern detection
-        if i >= 2:
-            recent = [midis[j] - midis[j-1] for j in range(max(1, i-3), i+1)]
-            steps = sum(1 for iv in recent if abs(iv) in [1, 2])
-            arps = sum(1 for iv in recent if abs(iv) in [3, 4, 5])
-            repeats = sum(1 for iv in recent if iv == 0)
-            pattern_scale = steps / len(recent)
-            pattern_arpeggio = arps / len(recent)
-            pattern_repeat = repeats / len(recent)
-        else:
-            pattern_scale = 0.0
-            pattern_arpeggio = 0.0
-            pattern_repeat = 0.0
+        # New technique features
+        rel_interval = (midi - midis[i-1]) / 12.0 if i > 0 else 0.0
+        local_range = midis[max(0, i-2):min(len(midis), i+3)]
+        l_var = (max(local_range) - min(local_range)) / 24.0 if len(local_range) > 1 else 0.0
         
         # Black key feature
-        def is_black(mk):
-            return (mk % 12) in [1, 3, 6, 8, 10]
-        black_key = 1.0 if is_black(midi) else 0.0
+        def is_black_note(m):
+            return (m % 12) in [1, 3, 6, 8, 10]
+        black_key = 1.0 if is_black_note(midi) else 0.0
 
         feature_vec = [
-            midi_norm,
-            duration,
-            delta_time,
-            interval_prev,
-            interval_next,
-            direction,
-            is_chord,
+            (midi - 21) / 87.0, # midi_norm
+            0.5, # duration placeholder
+            0.2, # delta_time placeholder
+            np.clip(rel_interval, -1.5, 1.5),
+            (midis[i+1] - midi) / 12.0 if i < n-1 else 0.0,
+            1.0 if i > 0 and midi > midis[i-1] else (-1.0 if i > 0 and midi < midis[i-1] else 0.0),
+            0.0, # is_chord (set to 0 during inference for now)
             black_key,
-            chord_size_norm,
-            chord_position,
-            pattern_scale,
-            pattern_arpeggio,
-            pattern_repeat
+            0.2, # chord_size
+            0.5, # chord_pos
+            0.0, 0.0, 0.0, # patterns
+            0.1, # phrase_start
+            l_var
         ]
         
         features.append(feature_vec)

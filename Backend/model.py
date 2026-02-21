@@ -158,7 +158,7 @@ class FocalLoss(nn.Module):
 class FingeringTransformer(nn.Module):
     def __init__(
         self,
-        input_dim=13,
+        input_dim=15,
         d_model=256,
         nhead=8,
         num_layers=4,
