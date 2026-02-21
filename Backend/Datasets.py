@@ -81,12 +81,14 @@ def encode_sequence(seq):
     4: interval_next (lookahead)
     5: direction
     6: is_chord
-    7: chord_size_norm
-    8: chord_position
-    9: pattern_scale
-    10: pattern_arpeggio
-    11: pattern_repeat
-    12-16: prev_finger one-hot
+    7: is_chord
+    8: black_key
+    9: chord_size_norm
+    10: chord_position
+    11: pattern_scale
+    12: pattern_arpeggio
+    13: pattern_repeat
+    14-18: prev_finger one-hot
     """
     features = []
     fingers = []
@@ -171,6 +173,11 @@ def encode_sequence(seq):
         if prev_finger is not None and 1 <= prev_finger <= 5:
             prev_finger_onehot[prev_finger - 1] = 1.0
         
+        # Black key feature
+        def is_black(midi):
+            return (midi % 12) in [1, 3, 6, 8, 10]
+        black_key = 1.0 if is_black(midi) else 0.0
+
         feature_vec = [
             midi_norm,
             duration,
@@ -179,6 +186,7 @@ def encode_sequence(seq):
             interval_next,
             direction,
             is_chord,
+            black_key,
             chord_size_norm,
             chord_position,
             pattern_scale,

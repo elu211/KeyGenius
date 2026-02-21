@@ -15,7 +15,7 @@ def load_model(checkpoint_path, hand='right'):
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
     model = FingeringTransformer(
-        input_dim=17,
+        input_dim=18,
         d_model=256,
         nhead=8,
         num_layers=6,
@@ -52,7 +52,9 @@ def notes_to_features(notes):
     9: pattern_scale
     10: pattern_arpeggio
     11: pattern_repeat
-    12-16: prev_finger one-hot (zeros at inference - we don't know yet)
+    12: pattern_repeat
+    13-17: prev_finger one-hot
+    18: black_key
     """
     features = []
     midis = [NOTE_TO_MIDI.get(n, 60) for n in notes]
@@ -101,6 +103,11 @@ def notes_to_features(notes):
         # Previous finger (unknown at inference, use zeros)
         prev_finger_onehot = [0.0, 0.0, 0.0, 0.0, 0.0]
         
+        # Black key feature
+        def is_black(m):
+            return (m % 12) in [1, 3, 6, 8, 10]
+        black_key = 1.0 if is_black(midi) else 0.0
+
         feature_vec = [
             midi_norm,
             duration,
@@ -109,6 +116,7 @@ def notes_to_features(notes):
             interval_next,
             direction,
             is_chord,
+            black_key,
             chord_size_norm,
             chord_position,
             pattern_scale,
@@ -148,7 +156,7 @@ def predict_batch(model, features, max_seq=200):
             
             all_fingers.extend(preds[0, :seq_len].cpu().numpy().tolist())
     
-    return all_fingers
+    return all_fingers, [0.9] * len(all_fingers) # Mock confidences for now
 
 
 def infer(img_input, checkpoint_path):
@@ -163,6 +171,7 @@ def infer(img_input, checkpoint_path):
         notes: ['C4', 'D4', ...] 
         coords: [(x, y, page), ...]
         fingers: [1, 2, 3, ...]
+        confidences: [0.95, 0.88, ...]
     """
     # Extract notes
     print("Extracting notes from image...")
@@ -190,9 +199,21 @@ def infer(img_input, checkpoint_path):
     
     # Predict
     print("Predicting fingerings with CRF...")
-    fingers = predict_batch(model, features)
+    fingers, confidences = predict_batch(model, features)
     
-    return notes, coords, fingers
+    return notes, coords, fingers, confidences
+
+def adjust_fingering_coords(coords, notes, hand='right'):
+    """
+    Adjust note coordinates to move them to a good position for finger numbers.
+    RH: Usually above the note. LH: Usually below.
+    """
+    adjusted = []
+    offset = -35 if hand == 'right' else 35
+    for (x, y, p) in coords:
+        # Move up/down depending on hand
+        adjusted.append((x, y + offset, p))
+    return adjusted
 
 
 if __name__ == "__main__":
