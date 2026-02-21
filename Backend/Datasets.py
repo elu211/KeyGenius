@@ -71,9 +71,9 @@ def extract_sequences(notes, hand, max_seq_len=200):
     return sequences
 
 
-def encode_sequence(seq):
+def encode_sequence(seq, is_training=False):
     """
-    18 features per note:
+    13 features per note:
     0: midi_norm
     1: duration
     2: delta_time
@@ -87,7 +87,6 @@ def encode_sequence(seq):
     10: pattern_scale
     11: pattern_arpeggio
     12: pattern_repeat
-    13-17: prev_finger one-hot
     """
     features = []
     fingers = []
@@ -119,12 +118,23 @@ def encode_sequence(seq):
                 'chord_position': pos / max(chord_size - 1, 1) if chord_size > 1 else 0.5
             }
     
-    prev_finger = None
-    
+    # --- DATA AUGMENTATION (Training only) ---
+    if is_training:
+        # Random transposition (-3 to +3 semitones)
+        if np.random.random() > 0.5:
+            transpose = np.random.randint(-3, 4)
+            midis = [m + transpose for m in midis]
+        
+        # Random time jitter
+        if np.random.random() > 0.5:
+            time_jitter = 1.0 + (np.random.random() - 0.5) * 0.1 
+            starts = [s * time_jitter for s in starts]
+            ends = [e * time_jitter for e in ends]
+
     for i, note in enumerate(seq):
-        midi = note['midi']
-        start = note['start']
-        dur = note['duration']
+        midi = midis[i]
+        start = starts[i]
+        dur = ends[i] - starts[i]
         finger = note['finger']
         
         # Basic features
@@ -152,7 +162,7 @@ def encode_sequence(seq):
         chord_size_norm = min(chord_info['chord_size'], 5) / 5.0
         chord_position = chord_info['chord_position']
         
-        # Pattern detection (look at previous 4 notes)
+        # Pattern detection
         if i >= 2:
             recent_intervals = [midis[j] - midis[j-1] for j in range(max(1, i-3), i+1)]
             steps = sum(1 for iv in recent_intervals if abs(iv) in [1, 2])
@@ -167,14 +177,9 @@ def encode_sequence(seq):
             pattern_arpeggio = 0.0
             pattern_repeat = 0.0
         
-        # Previous finger one-hot
-        prev_finger_onehot = [0.0] * 5
-        if prev_finger is not None and 1 <= prev_finger <= 5:
-            prev_finger_onehot[prev_finger - 1] = 1.0
-        
         # Black key feature
-        def is_black(midi):
-            return (midi % 12) in [1, 3, 6, 8, 10]
+        def is_black(m):
+            return (m % 12) in [1, 3, 6, 8, 10]
         black_key = 1.0 if is_black(midi) else 0.0
 
         feature_vec = [
@@ -190,13 +195,11 @@ def encode_sequence(seq):
             chord_position,
             pattern_scale,
             pattern_arpeggio,
-            pattern_repeat,
-            *prev_finger_onehot
+            pattern_repeat
         ]
         
         features.append(feature_vec)
         fingers.append(finger)
-        prev_finger = finger
     
     return np.array(features, dtype=np.float32), np.array(fingers, dtype=np.int64)
 
@@ -205,14 +208,14 @@ class FingeringDataset(Dataset):
     def __init__(self, data_dir, hand=0, max_seq_len=200, split='train', val_ratio=0.2):
         self.max_seq_len = max_seq_len
         self.hand = hand
+        self.split = split
         
         finger_files = sorted(Path(data_dir).glob("*.txt"))
         print(f"Found {len(finger_files)} fingering files")
         
-        # Group files by PIECE ID (e.g., "001", "002")
         piece_to_files = {}
         for f in finger_files:
-            piece_id = f.stem.split("-")[0]  # "001-1_fingering" -> "001"
+            piece_id = f.stem.split("-")[0]
             if piece_id not in piece_to_files:
                 piece_to_files[piece_id] = []
             piece_to_files[piece_id].append(f)
@@ -220,7 +223,6 @@ class FingeringDataset(Dataset):
         piece_ids = sorted(piece_to_files.keys())
         print(f"Found {len(piece_ids)} unique pieces")
         
-        # Split by PIECE, not by file
         np.random.seed(42)
         piece_indices = np.random.permutation(len(piece_ids))
         split_idx = int(len(piece_indices) * (1 - val_ratio))
@@ -232,14 +234,12 @@ class FingeringDataset(Dataset):
         
         print(f"{split.capitalize()}: {len(selected_pieces)} pieces")
         
-        # Get files for selected pieces
         selected_files = []
         for piece_id in selected_pieces:
             selected_files.extend(piece_to_files[piece_id])
         
         print(f"  {len(selected_files)} files")
         
-        # Extract sequences
         all_sequences = []
         for f in selected_files:
             notes = parse_fingering_file(f)
@@ -249,26 +249,18 @@ class FingeringDataset(Dataset):
         self.sequences = all_sequences
         print(f"  {len(self.sequences)} sequences for {'right' if hand == 0 else 'left'} hand")
         
-        # Print distribution
         all_fingers = []
         for seq in self.sequences:
             all_fingers.extend([n['finger'] for n in seq])
         dist = Counter(all_fingers)
         print(f"  Finger dist: {dict(sorted(dist.items()))}")
-        
-        # Chord stats
-        chord_count = sum(1 for seq in self.sequences for n in seq 
-                         if any(abs(n['start'] - n2['start']) < 0.02 and n != n2 
-                               for n2 in seq))
-        total_notes = len(all_fingers)
-        print(f"  Chord notes: ~{chord_count}/{total_notes}")
     
     def __len__(self):
         return len(self.sequences)
     
     def __getitem__(self, idx):
         seq = self.sequences[idx]
-        features, fingers = encode_sequence(seq)
+        features, fingers = encode_sequence(seq, is_training=(self.split == 'train'))
         
         seq_len = len(features)
         if seq_len < self.max_seq_len:
@@ -288,18 +280,7 @@ class FingeringDataset(Dataset):
 
 if __name__ == "__main__":
     data_dir = "Music_Data/FingeringFiles"
-    
-    print("=" * 60)
-    print("Checking for data leakage...")
-    print("=" * 60)
-    
-    train_ds = FingeringDataset(data_dir, hand=0, split='train')
-    val_ds = FingeringDataset(data_dir, hand=0, split='val')
-    
-    print(f"\nTrain sequences: {len(train_ds)}")
-    print(f"Val sequences: {len(val_ds)}")
-    
-    # Check feature shape
-    f, fingers, mask = train_ds[0]
+    ds = FingeringDataset(data_dir, hand=0, split='train')
+    f, fingers, mask = ds[0]
     print(f"\nFeature shape: {f.shape}")
     print(f"First 5 fingers: {fingers[:5].tolist()}")

@@ -15,10 +15,10 @@ def load_model(checkpoint_path, hand='right'):
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
     model = FingeringTransformer(
-        input_dim=18,
+        input_dim=13,
         d_model=256,
         nhead=8,
-        num_layers=6,
+        num_layers=4,
         dim_feedforward=1024,
         dropout=0.0,  # No dropout at inference
         num_fingers=6,
@@ -99,12 +99,9 @@ def notes_to_features(notes):
             pattern_arpeggio = 0.0
             pattern_repeat = 0.0
         
-        # Previous finger (unknown at inference, use zeros)
-        prev_finger_onehot = [0.0, 0.0, 0.0, 0.0, 0.0]
-        
         # Black key feature
-        def is_black(m):
-            return (m % 12) in [1, 3, 6, 8, 10]
+        def is_black(mk):
+            return (mk % 12) in [1, 3, 6, 8, 10]
         black_key = 1.0 if is_black(midi) else 0.0
 
         feature_vec = [
@@ -120,8 +117,7 @@ def notes_to_features(notes):
             chord_position,
             pattern_scale,
             pattern_arpeggio,
-            pattern_repeat,
-            *prev_finger_onehot
+            pattern_repeat
         ]
         
         features.append(feature_vec)

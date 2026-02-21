@@ -16,16 +16,16 @@ HAND_NAME = "right" if HAND == 0 else "left"
 MAX_SEQ_LEN = 256
 BATCH_SIZE = 64
 LR = 3e-4
-EPOCHS = 100
+EPOCHS = 80
 PATIENCE = 15
 
 # Transformer Params
-INPUT_DIM = 18
+INPUT_DIM = 13
 D_MODEL = 256
 NHEAD = 8
-NUM_LAYERS = 6
+NUM_LAYERS = 4
 DIM_FF = 1024
-DROPOUT = 0.1
+DROPOUT = 0.3
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Device: {device}")
@@ -70,7 +70,7 @@ model = FingeringTransformer(
 
 print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
-optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=0.05)
+optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=0.1)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2)
 
 # ============================================================
